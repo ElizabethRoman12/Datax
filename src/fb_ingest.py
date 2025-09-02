@@ -490,6 +490,92 @@ def ingest_audience_segments_weekly():
             fecha = entry["fecha"]
             for k, qty in (entry["data"] or {}).items():
                 insert_segmento_semanal(con, PLATAFORMA, PAGE_ID, fecha, ciudad=k, cantidad=int(qty or 0))
+#--------------------
+# # ---------- CAMPAÑAS (publicitarias) ----------
+# def ingest_campaigns():
+#     """
+#     Descarga campañas de Ads y guarda en:
+#       - campanias
+#       - metricas_campanias_diarias
+#     """
+#     fields = ",".join([
+#         "id",
+#         "name",
+#         "status",
+#         "effective_status",
+#         "start_time",
+#         "stop_time",
+#         "daily_budget",
+#         "budget_remaining",
+#     ])
+#     params = {"fields": fields}
+
+#     # 🔹 Listar campañas
+#     for camp in fb_paginate(f"{PAGE_ID}/campaigns", params):
+#         camp_id = camp["id"]
+#         nombre  = camp.get("name")
+#         estado  = camp.get("status")
+
+#         with conn() as con:
+#             # Inserta/actualiza tabla campanias
+#             con.cursor().execute(
+#                 """
+#                 INSERT INTO campanias (campania_id, plataforma, cuenta_id, nombre_campania)
+#                 VALUES (%s, %s, %s, %s)
+#                 ON CONFLICT (campania_id, plataforma, cuenta_id) DO UPDATE
+#                 SET nombre_campania = EXCLUDED.nombre_campania;
+#                 """,
+#                 [camp_id, "facebook", PAGE_ID, nombre]
+#             )
+#             con.commit()
+
+#         # 🔹 Insights diarios de la campaña
+#         insights = fb_get_fb(f"{camp_id}/insights", {
+#             "fields": ",".join([
+#                 "date_start", "date_stop",
+#                 "impressions","reach","clicks",
+#                 "spend","cpm","cpc","ctr"
+#             ]),
+#             "time_increment": 1  # diario
+#         })
+
+#         for row in insights.get("data", []):
+#             fecha = datetime.fromisoformat(row["date_start"]).date()
+#             impresiones = int(row.get("impressions", 0) or 0)
+#             alcance     = int(row.get("reach", 0) or 0)
+#             clicks      = int(row.get("clicks", 0) or 0)
+#             gasto       = float(row.get("spend", 0) or 0)
+#             cpm         = float(row.get("cpm", 0) or 0)
+#             cpc         = float(row.get("cpc", 0) or 0)
+#             ctr         = float(row.get("ctr", 0) or 0)
+
+#             with conn() as con:
+#                 con.cursor().execute(
+#                     """
+#                     INSERT INTO metricas_campanias_diarias (
+#                         plataforma, cuenta_id, campania_id,
+#                         fecha_descarga, presupuesto_invertido,
+#                         impresiones, alcance,
+#                         cpm, cpc, ctr
+#                     )
+#                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+#                     ON CONFLICT (plataforma, cuenta_id, campania_id, fecha_descarga)
+#                     DO UPDATE SET
+#                         presupuesto_invertido = EXCLUDED.presupuesto_invertido,
+#                         impresiones = EXCLUDED.impresiones,
+#                         alcance = EXCLUDED.alcance,
+#                         cpm = EXCLUDED.cpm,
+#                         cpc = EXCLUDED.cpc,
+#                         ctr = EXCLUDED.ctr;
+#                     """,
+#                     [
+#                         "facebook", PAGE_ID, camp_id,
+#                         fecha, gasto, impresiones, alcance,
+#                         cpm, cpc, ctr
+#                     ]
+#                 )
+#                 con.commit()
+# #-----------------
 
 def main():
     print("→ Ingesta de publicaciones")
@@ -498,6 +584,8 @@ def main():
     ingest_page_weekly()
     print("→ Ingesta semanal: segmentación de seguidores")
     ingest_audience_segments_weekly()
+    # print("→ Ingesta de campañas publicitarias")
+    # ingest_campaigns()
     print("✔ Listo")
 
 if __name__ == "__main__":
