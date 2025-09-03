@@ -1,7 +1,9 @@
+
 import os
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone
 import psycopg2
 from dotenv import load_dotenv
+from calc_variaciones import calcular_variaciones
 
 from graph_api import fb_get, paginate
 from graph_sql import (
@@ -13,30 +15,53 @@ from graph_sql import (
     insert_segmento_semanal
 )
 
+#  Configuración 
 load_dotenv()
 
 PLATAFORMA   = "facebook"
-FB_PAGE_ID   = os.getenv("FB_PAGE_ID")     # 👈 ahora usamos FB_PAGE_ID
+FB_PAGE_ID   = os.getenv("FB_PAGE_ID")
 PG_URL       = os.getenv("PG_URL")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN_FB")
 
-# ------------------ Helpers ------------------
+if not PG_URL:
+    raise RuntimeError("Falta PG_URL en .env")
+
+
+# Helpers
+
+def conn():
+    """Retorna una conexión PostgreSQL."""
+    return psycopg2.connect(PG_URL)
 
 def fb_get_fb(path, params=None):
+    """Wrapper para fb_get con token ya configurado."""
     return fb_get(path, params or {}, access_token=ACCESS_TOKEN)
 
 def fb_paginate(path, params=None):
+    """Wrapper para paginate con token ya configurado."""
     return paginate(path, params or {}, access_token=ACCESS_TOKEN)
 
-def conn():
-    if not PG_URL:
-        raise RuntimeError("Falta PG_URL en .env")
-    return psycopg2.connect(PG_URL)
+def parse_insights(js, metrics_map):
+    """
+    Convierte datos de /insights en un dict agrupado por fecha.
+    """
+    out = {}
+    for m in js.get("data", []):
+        name = m["name"]
+        field = metrics_map.get(name)
+        if not field:
+            continue
+        for v in m.get("values", []):
+            fecha = datetime.fromisoformat(v["end_time"].replace("Z","+00:00")).date()
+            out.setdefault(fecha, {f: 0 for f in metrics_map.values()})
+            out[fecha][field] = int(v.get("value") or 0)
+    return out
 
-# ------------------ Página ------------------
+
+# Ingesta Página
 
 def ingest_page():
-    """Inserta/actualiza la página antes de publicaciones"""
+    """Inserta/actualiza la página base antes de publicaciones."""
     js = fb_get_fb(FB_PAGE_ID, {"fields": "id,name"})
     page = {
         "pagina_id": str(js["id"]),
@@ -46,9 +71,11 @@ def ingest_page():
     with conn() as con:
         upsert_pagina(con, page)
 
-# ------------------ Reacciones ------------------
+
+#  Ingesta Publicaciones 
 
 def get_reactions_breakdown(post_id: str) -> dict:
+    """Obtiene desglose de reacciones por tipo para un post."""
     mapping = {
         "LIKE":  "me_gusta",
         "LOVE":  "me_encanta",
@@ -62,182 +89,141 @@ def get_reactions_breakdown(post_id: str) -> dict:
         js = fb_get_fb(f"{post_id}/reactions", {
             "type": api_type, "summary": "total_count", "limit": 0
         })
-        total = (js.get("summary") or {}).get("total_count", 0)
-        out[es_key] = int(total or 0)
+        out[es_key] = int(js.get("summary", {}).get("total_count", 0))
     return out
 
-# ------------------ Publicaciones ------------------
-
 def get_posts_since():
+    """Descarga publicaciones desde inicio de año."""
     year_start = datetime(datetime.now().year, 1, 1, tzinfo=timezone.utc).date().isoformat()
     fields = ",".join([
         "id","created_time","message","permalink_url","status_type",
         "attachments{media_type,unshimmed_url}",
         "shares","comments.summary(true).limit(0)","reactions.summary(true).limit(0)"
     ])
-    params = {"fields": fields, "since": year_start}
-    for item in fb_paginate(f"{FB_PAGE_ID}/posts", params):
-        yield item
+    return fb_paginate(f"{FB_PAGE_ID}/posts", {"fields": fields, "since": year_start})
 
 def daily_post_insights(post_id: str):
-    metrics = ["post_impressions","post_impressions_unique","post_clicks","post_video_views"]
-    js = fb_get_fb(f"{post_id}/insights", {"metric": ",".join(metrics), "period": "day"})
-    out = {}
-    for m in js.get("data", []):
-        for v in m.get("values", []):
-            d = datetime.fromisoformat(v["end_time"].replace("Z","+00:00")).date()
-            out.setdefault(d, {"impressions":0,"reach":0,"clicks":0,"video_views":0})
-            val = int(v.get("value") or 0)
-            if m["name"] == "post_impressions": out[d]["impressions"] = val
-            elif m["name"] == "post_impressions_unique": out[d]["reach"] = val
-            elif m["name"] == "post_clicks": out[d]["clicks"] = val
-            elif m["name"] == "post_video_views": out[d]["video_views"] = val
-    return out
+    """Obtiene métricas diarias de un post."""
+    metrics_map = {
+        "post_impressions": "impressions",
+        "post_impressions_unique": "reach",
+        "post_clicks": "clicks",
+        "post_video_views": "video_views"
+    }
+    js = fb_get_fb(f"{post_id}/insights", {"metric": ",".join(metrics_map), "period": "day"})
+    return parse_insights(js, metrics_map)
 
 def ingest_posts():
+    """Inserta publicaciones y sus métricas diarias."""
     with conn() as con:
         for p in get_posts_since():
-            pub_id = str(p["id"])  # forzamos texto
-            upsert_publicacion(con, PLATAFORMA, str(FB_PAGE_ID), p)
+            pub_id = str(p["id"])
+            upsert_publicacion(con, PLATAFORMA, FB_PAGE_ID, p) # type: ignore
 
-            comments  = (p.get("comments",  {}).get("summary", {}) or {}).get("total_count", 0)
-            shares    = (p.get("shares", {}) or {}).get("count", 0)
+            comments = p.get("comments", {}).get("summary", {}).get("total_count", 0)
+            shares   = p.get("shares", {}).get("count", 0)
 
+            # Reacciones detalladas
             try:
                 rx = get_reactions_breakdown(pub_id)
             except RuntimeError as e:
-                print(f"[WARN] No pude obtener reacciones por tipo para {pub_id}: {e}")
-                rx = {"me_gusta":0,"me_encanta":0,"me_divierte":0,"me_asombra":0,"me_entristece":0,"me_enoja":0}
+                print(f"[WARN] Reacciones no disponibles {pub_id}: {e}")
+                rx = {k: 0 for k in ["me_gusta","me_encanta","me_divierte","me_asombra","me_entristece","me_enoja"]}
 
-            per_day = daily_post_insights(pub_id)
-            for dia, vals in sorted(per_day.items()):
-                impresiones = vals.get("impressions", 0)
-                clicks      = vals.get("clicks", 0)
-                ctr         = (clicks / impresiones * 100.0) if impresiones > 0 else None
+            # Métricas por día
+            for dia, vals in sorted(daily_post_insights(pub_id).items()):
+                impresiones = vals["impressions"]
+                clicks      = vals["clicks"]
+                ctr         = (clicks / impresiones * 100) if impresiones else None
 
                 m = {
-                    "visualizaciones": vals.get("video_views", 0),
-                    "alcance":         vals.get("reach", 0),
-                    "impresiones":     impresiones,
+                    "visualizaciones": vals["video_views"],
+                    "alcance": vals["reach"],
+                    "impresiones": impresiones,
                     "tiempo_promedio": None,
-                    "comentarios":     comments,
-                    "compartidos":     shares,
-                    "guardados":       0,
-                    "clics_enlace":    clicks,
-                    "ctr":             ctr,
+                    "comentarios": comments,
+                    "compartidos": shares,
+                    "guardados": 0,
+                    "clics_enlace": clicks,
+                    "ctr": ctr,
                 }
-                upsert_metricas_publicacion_diaria(con, PLATAFORMA, str(FB_PAGE_ID), pub_id, dia, m)
+                upsert_metricas_publicacion_diaria(con, PLATAFORMA, FB_PAGE_ID, pub_id, dia, m)
 
+                # Guardar reacciones por tipo
                 for nombre_reaccion, cantidad in rx.items():
                     with con.cursor() as cur:
                         cur.execute("""
-                            SELECT id FROM tipo_reaccion
-                            WHERE plataforma=%s AND nombre=%s
+                            INSERT INTO tipo_reaccion (plataforma, nombre)
+                            VALUES (%s,%s)
+                            ON CONFLICT (plataforma, nombre) DO UPDATE SET nombre=EXCLUDED.nombre
+                            RETURNING id
                         """, (PLATAFORMA, nombre_reaccion))
-                        row = cur.fetchone()
-                        if row:
-                            tipo_id = row[0]
-                        else:
-                            cur.execute("""
-                                INSERT INTO tipo_reaccion (plataforma, nombre)
-                                VALUES (%s,%s) RETURNING id
-                            """, (PLATAFORMA, nombre_reaccion))
-                            tipo_id = cur.fetchone()[0] # type: ignore
+                        tipo_id = cur.fetchone()[0] # type: ignore
 
-                    upsert_reaccion_publicacion_diaria(
-                        con, PLATAFORMA, str(FB_PAGE_ID), pub_id, dia, tipo_id, cantidad
-                    )
+                    upsert_reaccion_publicacion_diaria(con, PLATAFORMA, FB_PAGE_ID, pub_id, dia, tipo_id, cantidad)
 
-# ------------------ Página semanal ------------------
+
+# Ingesta Página Semanal
 
 def ingest_page_weekly():
-    js = fb_get_fb(f"{FB_PAGE_ID}/insights", {
-        "metric": ",".join([
-            "page_impressions","page_impressions_unique","page_video_views","page_fans"
-        ]),
-        "period": "week"
-    })
-    by_week = {}
-    for m in js.get("data", []):
-        name = m["name"]
-        for v in m.get("values", []):
-            end = datetime.fromisoformat(v["end_time"].replace("Z","+00:00")).date()
-            row = by_week.setdefault(end, {"fecha_corte": end, "impresiones":0, "alcance":0, "video_views":0, "fans_total":0})
-            val = int(v.get("value") or 0)
-            if name == "page_impressions": row["impresiones"] = val
-            elif name == "page_impressions_unique": row["alcance"] = val
-            elif name == "page_video_views": row["video_views"] = val
-            elif name == "page_fans": row["fans_total"] = val
+    """Inserta métricas semanales de la página."""
+    metrics_map = {
+        "page_impressions": "impresiones",
+        "page_impressions_unique": "alcance",
+        "page_video_views": "video_views",
+        "page_fans": "fans_total"
+    }
+    js = fb_get_fb(f"{FB_PAGE_ID}/insights", {"metric": ",".join(metrics_map), "period": "week"})
+    by_week = parse_insights(js, metrics_map)
 
     with conn() as con:
-        for _, fila in by_week.items():
-            upsert_estadistica_pagina_semanal(con, PLATAFORMA, str(FB_PAGE_ID), fila)
+        for fecha, fila in by_week.items():
+            fila["fecha_corte"] = fecha
+            upsert_estadistica_pagina_semanal(con, PLATAFORMA, FB_PAGE_ID, fila)
 
-# ------------------ Segmentación semanal ------------------
+
+# Ingesta Segmentos Semanales
 
 def safe_insights(metric, period):
+    """Consulta insights y maneja métricas no disponibles."""
     try:
         return fb_get_fb(f"{FB_PAGE_ID}/insights", {"metric": metric, "period": period})
     except RuntimeError as e:
-        print(f"[WARN] Métrica no disponible: {metric} ({period}). Detalle: {e}")
+        print(f"[WARN] Métrica no disponible: {metric} ({period}). {e}")
         return {"data": []}
 
 def ingest_audience_segments_weekly():
-    gender_js  = safe_insights("page_fans_gender_age", "lifetime")
-    country_js = safe_insights("page_fans_country", "lifetime")
-    city_js    = safe_insights("page_fans_city", "lifetime")
+    """Inserta segmentación semanal de seguidores (género, país, ciudad)."""
+    metrics = {
+        "genero": "page_fans_gender_age",
+        "pais": "page_fans_country",
+        "ciudad": "page_fans_city"
+    }
 
-    def to_points(js):
-        pts = []
-        for m in js.get("data", []):
-            for v in m.get("values", []):
-                end = datetime.fromisoformat(v["end_time"].replace("Z","+00:00")).date()
-                pts.append((end, v.get("value") or {}))
-        return pts
-
-    def latest_by_iso_week(points):
+    def latest_by_iso_week(js):
+        points = [(datetime.fromisoformat(v["end_time"].replace("Z","+00:00")).date(), v.get("value", {}))
+                  for m in js.get("data", []) for v in m.get("values", [])]
         byweek = {}
-        for end, data in points:
-            key = end.isocalendar()[:2]
-            if key not in byweek or end >= byweek[key]["fecha"]:
-                byweek[key] = {"fecha": end, "data": data}
-        return byweek
-
-    g_week   = latest_by_iso_week(to_points(gender_js))
-    ctry_week= latest_by_iso_week(to_points(country_js))
-    city_week= latest_by_iso_week(to_points(city_js))
+        for fecha, data in points:
+            key = fecha.isocalendar()[:2]
+            if key not in byweek or fecha >= byweek[key]["fecha"]:
+                byweek[key] = {"fecha": fecha, "data": data}
+        return byweek.values()
 
     with conn() as con:
-        for entry in g_week.values():
-            fecha = entry["fecha"]
-            for k, qty in (entry["data"] or {}).items():
-                insert_segmento_semanal(con, PLATAFORMA, str(FB_PAGE_ID), fecha, genero=k, cantidad=int(qty or 0))
+        for campo, metric in metrics.items():
+            for entry in latest_by_iso_week(safe_insights(metric, "lifetime")):
+                fecha = entry["fecha"]
+                for k, qty in (entry["data"] or {}).items():
+                    insert_segmento_semanal(con, PLATAFORMA, FB_PAGE_ID, fecha, **{campo: k}, cantidad=int(qty or 0))
 
-        for entry in ctry_week.values():
-            fecha = entry["fecha"]
-            for k, qty in (entry["data"] or {}).items():
-                insert_segmento_semanal(con, PLATAFORMA, str(FB_PAGE_ID), fecha, pais=k, cantidad=int(qty or 0))
-
-        for entry in city_week.values():
-            fecha = entry["fecha"]
-            for k, qty in (entry["data"] or {}).items():
-                insert_segmento_semanal(con, PLATAFORMA, str(FB_PAGE_ID), fecha, ciudad=k, cantidad=int(qty or 0))
-
-# ------------------ Main ------------------
 
 def main():
-    print("→ Ingesta de página")
-    ingest_page()
-
-    print("→ Ingesta de publicaciones")
-    ingest_posts()
-
-    print("→ Ingesta semanal: página")
-    ingest_page_weekly()
-
-    print("→ Ingesta semanal: segmentación de seguidores")
-    ingest_audience_segments_weekly()
-
+    print("→ Ingesta de página"); ingest_page()
+    print("→ Ingesta de publicaciones"); ingest_posts()
+    print("→ Ingesta semanal: página"); ingest_page_weekly()
+    print("→ Ingesta semanal: segmentación de seguidores"); ingest_audience_segments_weekly()
+    calcular_variaciones()
     print("✔ Listo")
 
 if __name__ == "__main__":

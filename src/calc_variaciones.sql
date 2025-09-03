@@ -11,11 +11,11 @@ WITH m AS (
 )
 UPDATE metricas_publicaciones_diarias d
 SET
-  delta_visualizaciones = m.visualizaciones - m.prev_visualizaciones,
-  delta_alcance         = m.alcance - m.prev_alcance,
-  delta_comentarios     = m.comentarios - m.prev_comentarios,
-  delta_compartidos     = m.compartidos - m.prev_compartidos,
-  delta_guardados       = m.guardados - m.prev_guardados
+  delta_visualizaciones = COALESCE(m.visualizaciones - m.prev_visualizaciones, 0),
+  delta_alcance         = COALESCE(m.alcance - m.prev_alcance, 0),
+  delta_comentarios     = COALESCE(m.comentarios - m.prev_comentarios, 0),
+  delta_compartidos     = COALESCE(m.compartidos - m.prev_compartidos, 0),
+  delta_guardados       = COALESCE(m.guardados - m.prev_guardados, 0)
 FROM m
 WHERE d.plataforma=m.plataforma
   AND d.pagina_id=m.pagina_id

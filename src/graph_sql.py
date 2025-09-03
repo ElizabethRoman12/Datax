@@ -1,16 +1,21 @@
-import psycopg2
+
+"""
+Funciones de persistencia en PostgreSQL para las métricas de redes sociales.
+Incluye upserts de páginas, publicaciones, métricas, reacciones, estadísticas semanales y segmentación.
+"""
+
 from datetime import date
 
+# Helper 
+def _exec(conn, sql: str, params: tuple | dict):
+    """Ejecuta un SQL con parámetros usando cursor autogestionado."""
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
 
-
-#----------PAGINA
-def upsert_pagina(con, pagina: dict):
+# Página
+def upsert_pagina(conn, pagina: dict):
     """
     Inserta o actualiza la página en la tabla paginas.
-    Espera un dict con:
-      - pagina_id (str)
-      - plataforma (str)
-      - nombre (str)
     """
     sql = """
     INSERT INTO paginas (pagina_id, plataforma, nombre)
@@ -19,15 +24,12 @@ def upsert_pagina(con, pagina: dict):
     SET plataforma = EXCLUDED.plataforma,
         nombre     = EXCLUDED.nombre;
     """
-    params = (pagina["pagina_id"], pagina["plataforma"], pagina["nombre"])
-    with con.cursor() as cur:
-        cur.execute(sql, params)
-    con.commit()
+    _exec(conn, sql, (pagina["pagina_id"], pagina["plataforma"], pagina["nombre"]))
+    conn.commit()
 
-
-# ---------- PUBLICACIONES ----------
-
-def infer_formato(post):
+# Publicaciones
+def infer_formato(post: dict) -> str:
+    """Deduce el formato de publicación (imagen, video, carrusel, link)."""
     att = (post.get("attachments") or {}).get("data") or [{}]
     media = (att[0] or {}).get("media_type", "") or ""
     st = (post.get("status_type") or "") or ""
@@ -38,7 +40,8 @@ def infer_formato(post):
     if "link" in m or "shared_story" in s: return "link"
     return s or "desconocido"
 
-def upsert_publicacion(conn, plataforma, pagina_id, pub):
+def upsert_publicacion(conn, plataforma: str, pagina_id: str, pub: dict):
+    """Inserta/actualiza una publicación en la tabla publicaciones."""
     sql = """
     INSERT INTO publicaciones
       (plataforma, pagina_id, publicacion_id, url_publicacion,
@@ -61,12 +64,11 @@ def upsert_publicacion(conn, plataforma, pagina_id, pub):
         "texto": pub.get("message"),
         "formato": infer_formato(pub),
     }
-    with conn.cursor() as cur:
-        cur.execute(sql, params)
+    _exec(conn, sql, params)
 
-# ---------- MÉTRICAS PUBLICACIÓN DIARIA (SOLO GENERALES) ----------
-
+#  Métricas de publicación diaria
 def _ultimo_registro_prev(conn, plataforma, pagina_id, publicacion_id, fecha_descarga):
+    """Obtiene el último registro previo de métricas diarias para calcular deltas."""
     q = """
       SELECT visualizaciones, alcance, impresiones, comentarios, compartidos, guardados
       FROM metricas_publicaciones_diarias
@@ -76,11 +78,14 @@ def _ultimo_registro_prev(conn, plataforma, pagina_id, publicacion_id, fecha_des
     """
     with conn.cursor() as cur:
         cur.execute(q, (plataforma, pagina_id, publicacion_id, fecha_descarga))
-        return cur.fetchone()  # tuple or None
+        return cur.fetchone()
 
-def upsert_metricas_publicacion_diaria(conn, plataforma, pagina_id, publicacion_id, fecha_descarga: date, m):
+def upsert_metricas_publicacion_diaria(conn, plataforma, pagina_id, publicacion_id, fecha_descarga: date, m: dict):
+    """
+    Inserta/actualiza métricas diarias de una publicación.
+    Calcula deltas respecto al día anterior.
+    """
     prev = _ultimo_registro_prev(conn, plataforma, pagina_id, publicacion_id, fecha_descarga)
-    # Índices del SELECT previo: (visualizaciones, alcance, impresiones, comentarios, compartidos, guardados)
     d = lambda key, idx: (m.get(key, 0) - (prev[idx] if prev else 0))
 
     sql = """
@@ -112,39 +117,31 @@ def upsert_metricas_publicacion_diaria(conn, plataforma, pagina_id, publicacion_
        delta_compartidos     = EXCLUDED.delta_compartidos,
        delta_guardados       = EXCLUDED.delta_guardados;
     """
-
     row = {
         "plataforma": plataforma,
         "pagina_id": pagina_id,
         "publicacion_id": publicacion_id,
         "fecha_descarga": fecha_descarga,
-
         "visualizaciones": m.get("visualizaciones", 0),
         "alcance":         m.get("alcance", 0),
         "impresiones":     m.get("impresiones", 0),
-        "tiempo_promedio": m.get("tiempo_promedio", None),
-
+        "tiempo_promedio": m.get("tiempo_promedio"),
         "comentarios": m.get("comentarios", 0),
         "compartidos": m.get("compartidos", 0),
         "guardados":   m.get("guardados", 0),
-
         "clics": m.get("clics_enlace", 0),
-        "ctr":   m.get("ctr", None),
-
-        # deltas vs. día previo
+        "ctr":   m.get("ctr"),
         "d_vis":  d("visualizaciones", 0),
         "d_alc":  d("alcance", 1),
         "d_com":  d("comentarios", 3),
         "d_comp": d("compartidos", 4),
         "d_guard":d("guardados", 5),
     }
+    _exec(conn, sql, row)
 
-    with conn.cursor() as cur:
-        cur.execute(sql, row)
-
-# ---------- REACCIONES PUBLICACIÓN DIARIA ----------
-
+# Reacciones publicación diaria
 def upsert_reaccion_publicacion_diaria(conn, plataforma, pagina_id, publicacion_id, fecha_descarga: date, tipo_reaccion_id: int, cantidad: int):
+    """Inserta/actualiza reacciones diarias de una publicación."""
     sql = """
     INSERT INTO reacciones_publicacion_diaria
       (plataforma, pagina_id, publicacion_id, fecha_descarga, tipo_reaccion_id, cantidad)
@@ -152,12 +149,11 @@ def upsert_reaccion_publicacion_diaria(conn, plataforma, pagina_id, publicacion_
     ON CONFLICT (plataforma, pagina_id, publicacion_id, fecha_descarga, tipo_reaccion_id) DO UPDATE SET
       cantidad = EXCLUDED.cantidad;
     """
-    with conn.cursor() as cur:
-        cur.execute(sql, (plataforma, pagina_id, publicacion_id, fecha_descarga, tipo_reaccion_id, cantidad))
+    _exec(conn, sql, (plataforma, pagina_id, publicacion_id, fecha_descarga, tipo_reaccion_id, cantidad))
 
-# ---------- ESTADÍSTICAS DE PÁGINA (SEMANAL) ----------
-
-def upsert_estadistica_pagina_semanal(conn, plataforma, pagina_id, fila):
+# Estadísticas página semanal
+def upsert_estadistica_pagina_semanal(conn, plataforma, pagina_id, fila: dict):
+    """Inserta/actualiza estadísticas semanales de la página."""
     sql = """
     INSERT INTO estadisticas_pagina_semanal
       (plataforma, pagina_id, fecha_corte_semana, total_seguidores, alcance_pagina, visualizaciones_pagina)
@@ -167,20 +163,18 @@ def upsert_estadistica_pagina_semanal(conn, plataforma, pagina_id, fila):
       alcance_pagina = EXCLUDED.alcance_pagina,
       visualizaciones_pagina = EXCLUDED.visualizaciones_pagina;
     """
-    with conn.cursor() as cur:
-        cur.execute(sql, (
-            plataforma, pagina_id, fila["fecha_corte"],
-            fila.get("fans_total", 0), fila.get("alcance", 0), fila.get("impresiones", 0)
-        ))
+    _exec(conn, sql, (
+        plataforma, pagina_id, fila["fecha_corte"],
+        fila.get("fans_total", 0), fila.get("alcance", 0), fila.get("impresiones", 0)
+    ))
 
-# ---------- SEGMENTACIÓN (SEMANAL) ----------
-
+# Segmentación semanal
 def insert_segmento_semanal(conn, plataforma, pagina_id, fecha_corte, genero=None, pais=None, ciudad=None, nivel_edu=None, cantidad=0):
+    """Inserta un segmento de audiencia semanal (género, país, ciudad, educación)."""
     sql = """
     INSERT INTO segmentacion_seguidores_semanal
       (plataforma, pagina_id, fecha_corte_semana, genero, pais, ciudad, nivel_educacion, cantidad_seguidores)
     VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
     ON CONFLICT DO NOTHING;
     """
-    with conn.cursor() as cur:
-        cur.execute(sql, (plataforma, pagina_id, fecha_corte, genero, pais, ciudad, nivel_edu, cantidad))
+    _exec(conn, sql, (plataforma, pagina_id, fecha_corte, genero, pais, ciudad, nivel_edu, cantidad))
