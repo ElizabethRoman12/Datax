@@ -1,9 +1,0 @@
-pandas
-python-dotenv
-SQLAlchemy
-psycopg2-binary
-
-
-requests
-psycopg2-binary
-python-dotenv
