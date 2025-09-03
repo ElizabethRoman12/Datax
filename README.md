@@ -1,12 +1,11 @@
-# Dataxcat > README.md << 'EOF'
-# 📊 DATAX – Ingesta de Redes Sociales (v2-nueva-base)
+# DATAX – Ingesta de Redes Sociales (v2-nueva-base)
 
 Este proyecto corresponde a la **nueva versión (v2)** del sistema de ingesta de datos de redes sociales para **DATAX**.  
 Incluye la migración a un modelo de base de datos optimizado y la corrección de flujos de ingesta.
 
 ---
 
-## 🚀 Cambios principales respecto a la versión anterior (v1)
+## Cambios principales respecto a la versión anterior (v1)
 - **Nuevo modelo de base de datos**:
   - Normalización de reacciones en tabla `tipo_reaccion` + `reacciones_publicacion_diaria`.
   - Eliminación del campo redundante `reacciones` (ahora se calcula con un trigger y un campo `total_reacciones` en `metricas_publicaciones_diarias`).
