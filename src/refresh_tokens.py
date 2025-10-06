@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta
 from refresh_facebook import renovar_facebook
-# (aquí importas también renovar_linkedin, renovar_tiktok, etc.)
 
 from tokens import obtener_token
 

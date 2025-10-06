@@ -13,3 +13,36 @@ python -m venv .venv
 
 5: Ejecutar la ingesta de Instagram:
 python src/ig_ingest.py
+
+6. Si se desea actualizar el token de insta y facebook 
+   python src/refresh_graph.py   
+
+7. Para que este se ejecute diariamente se debe programar una tarea en la pc,
+esto lo que hace es ejecutar el archivo "refresh_graph.py" de manera automatica en el horario establecido
+y asi generar un token actualizado todos los dias.
+    Pasos:
+   *crear un archivo .bat fuera del proyecto por ejemplo con el nombre refresh_graph.bat:
+        @echo off
+        cd /d D:\DATAX\Datax_clone
+        call .venv\Scripts\activate
+        python src\refresh_graph.py >> logs\refresh.log 2>&1
+   *Pulsar Win + R, escribir taskschd.msc y dale Enter.
+   *En la ventana, seleccionar Crear tarea (no "crear tarea básica")
+   *Configurar la tarea
+        General:
+            -Nombre: Renovar tokens Facebook/Instagram u otro que desee
+            -Seleccionar "Ejecutar cuando el usuario haya iniciado sesion .
+            -Marcar "Ejecutar con los privilegios más altos".
+
+        Desencadenadores (Triggers):
+            -Presionar Nuevo 
+            → Configuracion → Diariamente → Repetir cada 1 día → Hora:La que desee
+        Acciones:
+            - Nueva → elegir donde se guardara
+             ejemplo: D:\DATAX\Datax_clone\refresh_graph.bat
+    * Para probar presionar Ejecutar
+
+    
+NOTA:
+Los archivos li_api, li_discover, li_ingest_nuevo, li_ingest, li_sql, li_test_shares, refresh_tokens
+son archivos en construccion para cuando se obtenga los permisos de la api de linkedin
