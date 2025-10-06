@@ -1,4 +1,5 @@
 PASOS:
+cd Datax_
 1: Crear el entorno virtual:
 python -m venv .venv
 
@@ -42,7 +43,7 @@ y asi generar un token actualizado todos los dias.
              ejemplo: D:\DATAX\Datax_clone\refresh_graph.bat
     * Para probar presionar Ejecutar
 
-    
+
 NOTA:
 Los archivos li_api, li_discover, li_ingest_nuevo, li_ingest, li_sql, li_test_shares, refresh_tokens
 son archivos en construccion para cuando se obtenga los permisos de la api de linkedin
