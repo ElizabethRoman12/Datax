@@ -16,9 +16,7 @@ from graph_sql import (
     insert_segmento_semanal,
 )
 
-# ================================
 # Configuración
-# ================================
 load_dotenv()
 
 PLATAFORMA = "instagram"
@@ -30,9 +28,7 @@ if not PG_URL:
 
 token_instagram = obtener_token(PLATAFORMA)["token_acceso"]
 
-# ================================
 # Helpers
-# ================================
 def conn():
     return psycopg2.connect(PG_URL)
 
@@ -50,9 +46,7 @@ def ig_id() -> str:
 def iso_date(s: str) -> date:
     return datetime.fromisoformat(s.replace("Z", "+00:00").replace("+0000", "+00:00")).date()
 
-# ================================
 # Ingesta de Cuenta
-# ================================
 def ingest_account():
     js = ig_get(ig_id(), {"fields": "id,username"})
     cuenta = {
@@ -63,9 +57,7 @@ def ingest_account():
     with conn() as con:
         upsert_pagina(con, cuenta)
 
-# ================================
 # Publicaciones y Métricas
-# ================================
 def get_media_por_rango(inicio: date, fin: date):
     """Obtiene publicaciones IG dentro del rango dado."""
     fields = ",".join([
@@ -106,9 +98,8 @@ def ingest_media(inicio: date, fin: date):
         print(f"⚠ No hay publicaciones entre {inicio} y {fin}")
         return
 
-    print(f"📸 {len(publicaciones)} publicaciones encontradas entre {inicio} y {fin}")
+    print(f"* {len(publicaciones)} publicaciones encontradas entre {inicio} y {fin}")
 
-    # 📅 Snapshot del día actual (fecha de descarga)
     fecha_descarga = date.today()
 
     with conn() as con:
@@ -116,7 +107,6 @@ def ingest_media(inicio: date, fin: date):
             media_id = str(m["id"])
             fecha_pub = iso_date(m["timestamp"])
 
-            # 🧱 Publicación base
             publicacion = {
                 "id": media_id,
                 "created_time": m.get("timestamp"),
@@ -130,7 +120,6 @@ def ingest_media(inicio: date, fin: date):
             }
             upsert_publicacion(con, PLATAFORMA, ig_id(), publicacion)
 
-            # 📊 Métricas lifetime de la publicación (snapshot diario)
             ins = media_insights_lifetime(media_id)
             metricas = {
                 "visualizaciones": int(ins.get("video_views", 0)),
@@ -144,12 +133,10 @@ def ingest_media(inicio: date, fin: date):
                 "ctr": None,
             }
 
-            # 📥 Guardar snapshot con la fecha actual
             upsert_metricas_publicacion_diaria(
                 con, PLATAFORMA, ig_id(), media_id, fecha_descarga, metricas
             )
 
-            # 💬 Reacciones (solo "me gusta")
             with con.cursor() as cur:
                 cur.execute("""
                     INSERT INTO tipo_reaccion (plataforma, nombre)
@@ -163,9 +150,7 @@ def ingest_media(inicio: date, fin: date):
                 con, PLATAFORMA, ig_id(), media_id, fecha_descarga, tipo_id, int(m.get("like_count") or 0)
             )
 
-# ================================
 # Página y Audiencia
-# ================================
 def ingest_account_range(inicio: date, fin: date):
     """Inserta métricas diarias de cuenta IG (seguidores y alcance) para el rango."""
     per_day = {}
@@ -227,11 +212,7 @@ def ingest_audience_segments_range(fecha: date):
             for k, qty in buckets[dim].items():
                 insert_segmento_semanal(con, PLATAFORMA, ig_id(), fecha, **{campo: f"AGE.{k}" if dim=="age" else k}, cantidad=qty)
 
-# ================================
-# MAIN
-# ================================
 def main():
-    # Fechas de entrada
     if len(sys.argv) == 3:
         inicio = datetime.strptime(sys.argv[1], "%Y-%m-%d").date()
         fin = datetime.strptime(sys.argv[2], "%Y-%m-%d").date()
