@@ -6,16 +6,22 @@ Incluye upserts de páginas, publicaciones, métricas, reacciones, estadísticas
 
 from datetime import date
 
-# Helper 
-def _exec(conn, sql: str, params: tuple | dict):
-    """Ejecuta un SQL con parámetros usando cursor autogestionado."""
+# Helper genérico para ejecución de SQL
+def _exec(conn, sql: str, params: tuple | dict = ()):
+    """
+    Ejecuta un SQL con parámetros y confirma cambios.
+    Se usa un cursor autogestionado para asegurar cierre correcto.
+    """
     with conn.cursor() as cur:
         cur.execute(sql, params)
+    # No siempre conviene commitear aquí (Airflow puede manejar transacciones),
+    # pero lo dejamos explícito para mantener compatibilidad con scripts existentes.
+    conn.commit()
 
 # Página
 def upsert_pagina(conn, pagina: dict):
     """
-    Inserta o actualiza la página en la tabla paginas.
+    Inserta o actualiza la página en la tabla 'paginas'.
     """
     sql = """
     INSERT INTO paginas (pagina_id, plataforma, nombre)
@@ -25,23 +31,27 @@ def upsert_pagina(conn, pagina: dict):
         nombre     = EXCLUDED.nombre;
     """
     _exec(conn, sql, (pagina["pagina_id"], pagina["plataforma"], pagina["nombre"]))
-    conn.commit()
 
 # Publicaciones
 def infer_formato(post: dict) -> str:
-    """Deduce el formato de publicación (imagen, video, carrusel, link)."""
+    """Deduce el formato de publicación (imagen, video, carrusel, link, etc.)."""
     att = (post.get("attachments") or {}).get("data") or [{}]
     media = (att[0] or {}).get("media_type", "") or ""
     st = (post.get("status_type") or "") or ""
     m, s = media.lower(), st.lower()
-    if "video" in (m or s): return "video"
-    if "photo" in m or "image" in m: return "imagen"
-    if "album" in m: return "carrusel"
-    if "link" in m or "shared_story" in s: return "link"
+
+    if "video" in (m or s):
+        return "video"
+    if "photo" in m or "image" in m:
+        return "imagen"
+    if "album" in m or "carousel" in m:
+        return "carrusel"
+    if "link" in m or "shared_story" in s:
+        return "link"
     return s or "desconocido"
 
 def upsert_publicacion(conn, plataforma: str, pagina_id: str, pub: dict):
-    """Inserta/actualiza una publicación en la tabla publicaciones."""
+    """Inserta o actualiza una publicación en la tabla 'publicaciones'."""
     sql = """
     INSERT INTO publicaciones
       (plataforma, pagina_id, publicacion_id, url_publicacion,
@@ -60,23 +70,21 @@ def upsert_publicacion(conn, plataforma: str, pagina_id: str, pub: dict):
         "pagina_id": pagina_id,
         "publicacion_id": pub["id"],
         "url": pub.get("permalink_url"),
-        "fecha_hora": pub["created_time"].replace("Z","+00:00"),
+        "fecha_hora": pub["created_time"].replace("Z", "+00:00"),
         "texto": pub.get("message"),
         "formato": infer_formato(pub),
     }
     _exec(conn, sql, params)
-     
 
-
-#  Métricas de publicación diaria
+# Métricas de publicación diaria
 def _ultimo_registro_prev(conn, plataforma, pagina_id, publicacion_id, fecha_descarga):
     """Obtiene el último registro previo de métricas diarias para calcular deltas."""
     q = """
-      SELECT visualizaciones, alcance, impresiones, comentarios, compartidos, guardados
-      FROM metricas_publicaciones_diarias
-      WHERE plataforma=%s AND pagina_id=%s AND publicacion_id=%s AND fecha_descarga < %s
-      ORDER BY fecha_descarga DESC
-      LIMIT 1
+    SELECT visualizaciones, alcance, impresiones, comentarios, compartidos, guardados
+    FROM metricas_publicaciones_diarias
+    WHERE plataforma=%s AND pagina_id=%s AND publicacion_id=%s AND fecha_descarga < %s
+    ORDER BY fecha_descarga DESC
+    LIMIT 1
     """
     with conn.cursor() as cur:
         cur.execute(q, (plataforma, pagina_id, publicacion_id, fecha_descarga))
@@ -125,27 +133,25 @@ def upsert_metricas_publicacion_diaria(conn, plataforma, pagina_id, publicacion_
         "publicacion_id": publicacion_id,
         "fecha_descarga": fecha_descarga,
         "visualizaciones": m.get("visualizaciones", 0),
-        "alcance":         m.get("alcance", 0),
-        "impresiones":     m.get("impresiones", 0),
+        "alcance": m.get("alcance", 0),
+        "impresiones": m.get("impresiones", 0),
         "tiempo_promedio": m.get("tiempo_promedio"),
         "comentarios": m.get("comentarios", 0),
         "compartidos": m.get("compartidos", 0),
-        "guardados":   m.get("guardados", 0),
+        "guardados": m.get("guardados", 0),
         "clics": m.get("clics_enlace", 0),
-        "ctr":   m.get("ctr"),
-        "d_vis":  d("visualizaciones", 0),
-        "d_alc":  d("alcance", 1),
-        "d_com":  d("comentarios", 3),
+        "ctr": m.get("ctr"),
+        "d_vis": d("visualizaciones", 0),
+        "d_alc": d("alcance", 1),
+        "d_com": d("comentarios", 3),
         "d_comp": d("compartidos", 4),
-        "d_guard":d("guardados", 5),
+        "d_guard": d("guardados", 5),
     }
     _exec(conn, sql, row)
-    conn.commit()
 
-
-# Reacciones publicación diaria
+# Reacciones de publicación diaria
 def upsert_reaccion_publicacion_diaria(conn, plataforma, pagina_id, publicacion_id, fecha_descarga: date, tipo_reaccion_id: int, cantidad: int):
-    """Inserta/actualiza reacciones diarias de una publicación."""
+    """Inserta o actualiza reacciones diarias de una publicación."""
     sql = """
     INSERT INTO reacciones_publicacion_diaria
       (plataforma, pagina_id, publicacion_id, fecha_descarga, tipo_reaccion_id, cantidad)
@@ -155,9 +161,9 @@ def upsert_reaccion_publicacion_diaria(conn, plataforma, pagina_id, publicacion_
     """
     _exec(conn, sql, (plataforma, pagina_id, publicacion_id, fecha_descarga, tipo_reaccion_id, cantidad))
 
-# Estadísticas página semanal
+# Estadísticas semanales de página
 def upsert_estadistica_pagina_semanal(conn, plataforma, pagina_id, fila: dict):
-    """Inserta/actualiza estadísticas semanales de la página."""
+    """Inserta o actualiza estadísticas semanales de la página."""
     sql = """
     INSERT INTO estadisticas_pagina_semanal
       (plataforma, pagina_id, fecha_corte_semana, total_seguidores, alcance_pagina, visualizaciones_pagina)
@@ -168,8 +174,12 @@ def upsert_estadistica_pagina_semanal(conn, plataforma, pagina_id, fila: dict):
       visualizaciones_pagina = EXCLUDED.visualizaciones_pagina;
     """
     _exec(conn, sql, (
-        plataforma, pagina_id, fila["fecha_corte"],
-        fila.get("fans_total", 0), fila.get("alcance", 0), fila.get("impresiones", 0)
+        plataforma,
+        pagina_id,
+        fila["fecha_corte"],
+        fila.get("fans_total", 0),
+        fila.get("alcance", 0),
+        fila.get("impresiones", 0),
     ))
 
 # Segmentación semanal

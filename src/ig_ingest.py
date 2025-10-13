@@ -5,7 +5,7 @@ import psycopg2
 from dotenv import load_dotenv
 from calc_variaciones import calcular_variaciones
 
-from tokens import obtener_token  
+from tokens import obtener_token
 from graph_api import fb_get, paginate
 from graph_sql import (
     upsert_pagina,
@@ -26,17 +26,19 @@ IG_USER_ID = os.getenv("IG_USER_ID")
 if not PG_URL:
     raise RuntimeError("Falta PG_URL en .env")
 
-token_instagram = obtener_token(PLATAFORMA)["token_acceso"]
+# Token dinámico (para evitar expiraciones si se importa desde Airflow)
+def get_token_instagram():
+    return obtener_token(PLATAFORMA)["token_acceso"]
 
 # Helpers
 def conn():
     return psycopg2.connect(PG_URL)
 
 def ig_get(path, params=None):
-    return fb_get(path, params or {}, access_token=token_instagram)
+    return fb_get(path, params or {}, access_token=get_token_instagram())
 
 def ig_paginate(path, params=None):
-    return paginate(path, params or {}, access_token=token_instagram)
+    return paginate(path, params or {}, access_token=get_token_instagram())
 
 def ig_id() -> str:
     if not IG_USER_ID:
@@ -88,8 +90,6 @@ def media_insights_lifetime(media_id: str) -> dict:
                 print(f"[WARN] insights {metric} falló para media {media_id}: {e}")
     return out
 
-from datetime import date
-
 def ingest_media(inicio: date, fin: date):
     """Inserta publicaciones IG y sus métricas dentro del rango (snapshot diario)."""
     publicaciones = get_media_por_rango(inicio, fin)
@@ -98,7 +98,6 @@ def ingest_media(inicio: date, fin: date):
         return
 
     print(f"* {len(publicaciones)} publicaciones encontradas entre {inicio} y {fin}")
-
     fecha_descarga = date.today()
 
     with conn() as con:
@@ -119,7 +118,6 @@ def ingest_media(inicio: date, fin: date):
             }
             upsert_publicacion(con, PLATAFORMA, ig_id(), publicacion)
 
-         
             ins = media_insights_lifetime(media_id)
             metricas = {
                 "visualizaciones": int(ins.get("video_views", 0)),
@@ -133,9 +131,7 @@ def ingest_media(inicio: date, fin: date):
                 "ctr": None,
             }
 
-            upsert_metricas_publicacion_diaria(
-                con, PLATAFORMA, ig_id(), media_id, fecha_descarga, metricas
-            )
+            upsert_metricas_publicacion_diaria(con, PLATAFORMA, ig_id(), media_id, fecha_descarga, metricas)
 
             with con.cursor() as cur:
                 cur.execute("""
@@ -161,11 +157,11 @@ def ingest_account_range(inicio: date, fin: date):
                 "period": "day",
                 "since": int(datetime.combine(start, datetime.min.time()).replace(tzinfo=timezone.utc).timestamp()),
                 "until": int(datetime.combine(end, datetime.min.time()).replace(tzinfo=timezone.utc).timestamp()),
-                "metric": metric
+                "metric": metric,
             })
             for m in js.get("data", []):
                 for v in m.get("values", []):
-                    d = datetime.fromisoformat(v["end_time"].replace("Z","+00:00")).date()
+                    d = datetime.fromisoformat(v["end_time"].replace("Z", "+00:00")).date()
                     per_day.setdefault(d, {"reach": 0, "follower_count": 0})
                     per_day[d][metric] = int(v.get("value") or 0)
         except RuntimeError as e:
@@ -187,6 +183,7 @@ def ingest_account_range(inicio: date, fin: date):
 
 def ingest_audience_segments_range(fecha: date):
     dims = {"city": "ciudad", "country": "pais", "gender": "genero", "age": "genero"}
+
     def fetch_breakdown(dim):
         return ig_get(f"{ig_id()}/insights", {
             "metric": "follower_demographics",
@@ -194,11 +191,12 @@ def ingest_audience_segments_range(fecha: date):
             "metric_type": "total_value",
             "breakdown": dim,
         })
-    buckets = {k:{} for k in dims}
+
+    buckets = {k: {} for k in dims}
     for dim in dims:
         try:
             js = fetch_breakdown(dim)
-            for b in (js.get("data",[{}])[0].get("breakdowns") or []):
+            for b in (js.get("data", [{}])[0].get("breakdowns") or []):
                 if (b.get("dimension") or "").lower() != dim:
                     continue
                 for v in b.get("values", []):
@@ -210,25 +208,26 @@ def ingest_audience_segments_range(fecha: date):
     with conn() as con:
         for dim, campo in dims.items():
             for k, qty in buckets[dim].items():
-                insert_segmento_semanal(con, PLATAFORMA, ig_id(), fecha, **{campo: f"AGE.{k}" if dim=="age" else k}, cantidad=qty)
+                insert_segmento_semanal(con, PLATAFORMA, ig_id(), fecha, **{campo: f"AGE.{k}" if dim == "age" else k}, cantidad=qty)
 
-def main():
-    # Fechas de entrada
-    if len(sys.argv) == 3:
-        inicio = datetime.strptime(sys.argv[1], "%Y-%m-%d").date()
-        fin = datetime.strptime(sys.argv[2], "%Y-%m-%d").date()
-    else:
-        inicio = fin = date.today()
+# Función principal (CLI + Airflow)
+def run_ig_ingest(start_date: str, end_date: str):
+    """Función reutilizable para Airflow o ejecución manual."""
+    inicio = datetime.strptime(start_date, "%Y-%m-%d").date()
+    fin = datetime.strptime(end_date, "%Y-%m-%d").date()
 
     print(f"\n→ IG: Ingestando datos desde {inicio} hasta {fin}\n")
-
     ingest_account()
     ingest_media(inicio, fin)
     ingest_account_range(inicio, fin)
     ingest_audience_segments_range(fin)
-
     calcular_variaciones()
     print("\n✔ IG listo (rango procesado correctamente)")
 
+# CLI entrypoint
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 3:
+        run_ig_ingest(sys.argv[1], sys.argv[2])
+    else:
+        hoy = date.today().isoformat()
+        run_ig_ingest(hoy, hoy)

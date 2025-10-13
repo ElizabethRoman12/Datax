@@ -9,11 +9,21 @@ WITH m AS (
     comentarios,
     compartidos,
     guardados,
-    LAG(visualizaciones) OVER (PARTITION BY plataforma, pagina_id, publicacion_id ORDER BY fecha_descarga) AS prev_visualizaciones,
-    LAG(alcance)         OVER (PARTITION BY plataforma, pagina_id, publicacion_id ORDER BY fecha_descarga) AS prev_alcance,
-    LAG(comentarios)     OVER (PARTITION BY plataforma, pagina_id, publicacion_id ORDER BY fecha_descarga) AS prev_comentarios,
-    LAG(compartidos)     OVER (PARTITION BY plataforma, pagina_id, publicacion_id ORDER BY fecha_descarga) AS prev_compartidos,
-    LAG(guardados)       OVER (PARTITION BY plataforma, pagina_id, publicacion_id ORDER BY fecha_descarga) AS prev_guardados
+    LAG(visualizaciones) OVER (
+      PARTITION BY plataforma, pagina_id, publicacion_id ORDER BY fecha_descarga
+    ) AS prev_visualizaciones,
+    LAG(alcance) OVER (
+      PARTITION BY plataforma, pagina_id, publicacion_id ORDER BY fecha_descarga
+    ) AS prev_alcance,
+    LAG(comentarios) OVER (
+      PARTITION BY plataforma, pagina_id, publicacion_id ORDER BY fecha_descarga
+    ) AS prev_comentarios,
+    LAG(compartidos) OVER (
+      PARTITION BY plataforma, pagina_id, publicacion_id ORDER BY fecha_descarga
+    ) AS prev_compartidos,
+    LAG(guardados) OVER (
+      PARTITION BY plataforma, pagina_id, publicacion_id ORDER BY fecha_descarga
+    ) AS prev_guardados
   FROM metricas_publicaciones_diarias
 )
 UPDATE metricas_publicaciones_diarias d
