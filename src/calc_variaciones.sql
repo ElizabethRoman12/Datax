@@ -1,7 +1,14 @@
 WITH m AS (
   SELECT
-    plataforma, pagina_id, publicacion_id, fecha_descarga,
-    visualizaciones, alcance, comentarios, compartidos, guardados,
+    plataforma,
+    pagina_id,
+    publicacion_id,
+    fecha_descarga,
+    visualizaciones,
+    alcance,
+    comentarios,
+    compartidos,
+    guardados,
     LAG(visualizaciones) OVER (PARTITION BY plataforma, pagina_id, publicacion_id ORDER BY fecha_descarga) AS prev_visualizaciones,
     LAG(alcance)         OVER (PARTITION BY plataforma, pagina_id, publicacion_id ORDER BY fecha_descarga) AS prev_alcance,
     LAG(comentarios)     OVER (PARTITION BY plataforma, pagina_id, publicacion_id ORDER BY fecha_descarga) AS prev_comentarios,
@@ -17,7 +24,7 @@ SET
   delta_compartidos     = COALESCE(m.compartidos - m.prev_compartidos, 0),
   delta_guardados       = COALESCE(m.guardados - m.prev_guardados, 0)
 FROM m
-WHERE d.plataforma=m.plataforma
-  AND d.pagina_id=m.pagina_id
-  AND d.publicacion_id=m.publicacion_id
-  AND d.fecha_descarga=m.fecha_descarga;
+WHERE d.plataforma = m.plataforma
+  AND d.pagina_id = m.pagina_id
+  AND d.publicacion_id = m.publicacion_id
+  AND d.fecha_descarga = m.fecha_descarga;

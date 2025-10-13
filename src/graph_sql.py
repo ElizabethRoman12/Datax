@@ -65,6 +65,8 @@ def upsert_publicacion(conn, plataforma: str, pagina_id: str, pub: dict):
         "formato": infer_formato(pub),
     }
     _exec(conn, sql, params)
+     
+
 
 #  Métricas de publicación diaria
 def _ultimo_registro_prev(conn, plataforma, pagina_id, publicacion_id, fecha_descarga):
@@ -138,6 +140,8 @@ def upsert_metricas_publicacion_diaria(conn, plataforma, pagina_id, publicacion_
         "d_guard":d("guardados", 5),
     }
     _exec(conn, sql, row)
+    conn.commit()
+
 
 # Reacciones publicación diaria
 def upsert_reaccion_publicacion_diaria(conn, plataforma, pagina_id, publicacion_id, fecha_descarga: date, tipo_reaccion_id: int, cantidad: int):

@@ -13,7 +13,8 @@ python -m venv .venv
  python src/fb_ingest.py
 
 5: Ejecutar la ingesta de Instagram:
-python src/ig_ingest.py
+python src/ig_ingest.py (modo diario)
+python src/ig_ingest_rango.py 2025-10-01 2025-10-12 (rango personalizado)
 
 6. Si se desea actualizar el token de insta y facebook 
    python src/refresh_graph.py   
@@ -44,6 +45,8 @@ y asi generar un token actualizado todos los dias.
     * Para probar presionar Ejecutar
 
 
-NOTA:
+NOTA 1:
 Los archivos li_api, li_discover, li_ingest_nuevo, li_ingest, li_sql, li_test_shares, refresh_tokens
 son archivos en construccion para cuando se obtenga los permisos de la api de linkedin
+NOTA 2:
+La ingesta de datos es desde el 1 de enero del  año actual hasta la fecha actual (la fecha de ejecución del script).
