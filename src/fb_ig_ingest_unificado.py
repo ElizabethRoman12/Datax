@@ -557,20 +557,52 @@ def ejecutar_ingesta_instagram(inicio: date, fin: date):
         })
 
     # PUBLICACIONES
-    def media_insights_lifetime(media_id: str) -> dict:
-        """Obtiene métricas lifetime (alcance, guardados, video_views) de una publicación IG."""
+    # def media_insights_lifetime(media_id: str) -> dict:
+    #     """Obtiene métricas lifetime (alcance, guardados, video_views) de una publicación IG."""
+    #     out = {"reach": 0, "saved": 0, "video_views": 0}
+    #     for metric in ("reach,saved", "video_views"):
+    #         try:
+    #             js = ig_get(f"{media_id}/insights", {"metric": metric})
+    #             for m in js.get("data", []):
+    #                 vals = m.get("values", [])
+    #                 if vals:
+    #                     out[m["name"]] = int(vals[-1].get("value") or 0)
+    #         except RuntimeError as e:
+    #             if "does not support the video_views metric" not in str(e):
+    #                 print(f"[WARN] insights {metric} falló para media {media_id}: {e}")
+    #     return out
+
+    def media_insights_lifetime(media_id: str, media_type: str) -> dict:
+        """Obtiene métricas lifetime (alcance, guardados y vistas de video) de una publicación IG."""
         out = {"reach": 0, "saved": 0, "video_views": 0}
-        for metric in ("reach,saved", "video_views"):
+
+        # Métricas base (todas las publicaciones)
+        for metric in ("reach", "saved"):
             try:
                 js = ig_get(f"{media_id}/insights", {"metric": metric})
                 for m in js.get("data", []):
                     vals = m.get("values", [])
                     if vals:
                         out[m["name"]] = int(vals[-1].get("value") or 0)
-            except RuntimeError as e:
-                if "does not support the video_views metric" not in str(e):
-                    print(f"[WARN] insights {metric} falló para media {media_id}: {e}")
+            except Exception as e:
+                print(f"[WARN] {metric} falló para media {media_id}: {e}")
+
+        # Solo consultar video_views si aplica
+        if media_type in ("VIDEO", "REEL"):
+            try:
+                js = ig_get(f"{media_id}/insights", {"metric": "video_views"})
+                for m in js.get("data", []):
+                    vals = m.get("values", [])
+                    if vals:
+                        out["video_views"] = int(vals[-1].get("value") or 0)
+            except Exception as e:
+                print(f"[WARN] video_views no disponible para {media_id}: {e}")
+
         return out
+
+
+
+
 
     # Publicaciones por rango
     fields = ",".join([
@@ -611,7 +643,9 @@ def ejecutar_ingesta_instagram(inicio: date, fin: date):
             }
             upsert_publicacion(con, PLATAFORMA, IG_USER_ID, publicacion)
 
-            ins = media_insights_lifetime(media_id)
+            #ins = media_insights_lifetime(media_id)
+            ins = media_insights_lifetime(media_id, m.get("media_type", "").upper())
+
             metricas = {
                 "visualizaciones": int(ins.get("video_views", 0)),
                 "alcance": int(ins.get("reach", 0)),
