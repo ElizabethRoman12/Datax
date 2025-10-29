@@ -68,6 +68,7 @@ def obtener_token_pagina(token_usuario: str, page_id: str) -> str:
             return page["access_token"]
     raise RuntimeError(f"No encontré la página {page_id} en /me/accounts")
 
+
 def actualizar_token(plataforma: str, token_acceso: str, token_refresh=None, expira_en=None):
     with conn() as c:
         cur = c.cursor()
