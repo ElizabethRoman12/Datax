@@ -58,15 +58,9 @@ def obtener_token(plataforma: str):
     }
 
 def obtener_token_pagina(token_usuario: str, page_id: str) -> str:
-    url = f"{FB_GRAPH}/me/accounts"
-    params = {"access_token": token_usuario}
-    r = requests.get(url, params=params)
-    r.raise_for_status()
-    data = r.json().get("data", [])
-    for page in data:
-        if page["id"] == page_id:
-            return page["access_token"]
-    raise RuntimeError(f"No encontré la página {page_id} en /me/accounts")
+    return token_usuario
+
+
 
 def actualizar_token(plataforma: str, token_acceso: str, token_refresh=None, expira_en=None):
     with conn() as c:
@@ -382,6 +376,7 @@ def ejecutar_ingesta_facebook(inicio: date, fin: date):
 
     # Publicaciones
     def get_posts_por_rango(inicio: date, fin: date):
+       
         since = inicio - timedelta(days=1)
         fields = ",".join([
             "id","created_time","message","permalink_url","status_type",
@@ -391,7 +386,7 @@ def ejecutar_ingesta_facebook(inicio: date, fin: date):
         publicaciones = []
         try:
             for post in fb_paginate(
-                f"{FB_PAGE_ID}/posts",
+                f"{FB_PAGE_ID}/feed",
                 {"fields": fields, "since": since.isoformat(), "until": fin.isoformat()}
             ):
                 ts = post.get("created_time")
@@ -403,11 +398,18 @@ def ejecutar_ingesta_facebook(inicio: date, fin: date):
                 if inicio <= fecha_pub_local <= fin:
                     publicaciones.append(post)
         except RuntimeError as e:
-            print(f"[WARN] Error al obtener publicaciones del rango {inicio}–{fin}: {e}")
-            return []
+            if "FB 500" in str(e):
+                print(f"[WARN] Facebook devolvió 500 (sin datos en el rango {inicio}–{fin})")
+                return []
+            else:
+                print(f"[WARN] Error al obtener publicaciones del rango {inicio}–{fin}: {e}")
+                return []
+
         if not publicaciones:
             print(f"⚠ No hay publicaciones entre {inicio} y {fin}")
         return publicaciones
+
+
 
     def get_reactions_breakdown(post_id: str) -> dict:
         mapping = {
