@@ -28,7 +28,7 @@ if not PG_URL:
 
 # Token dinámico desde BD
 token_usuario = obtener_token(PLATAFORMA)["token_acceso"]
-token_facebook = obtener_token_pagina(token_usuario, FB_PAGE_ID)
+token_facebook = obtener_token_pagina(token_usuario, FB_PAGE_ID) # type: ignore
 
 # Helpers
 def conn():
@@ -160,7 +160,7 @@ def ingest_posts(inicio: date, fin: date):
     with conn() as con:
         for p in posts:
             pub_id = str(p["id"])
-            upsert_publicacion(con, PLATAFORMA, FB_PAGE_ID, p)
+            upsert_publicacion(con, PLATAFORMA, FB_PAGE_ID, p) # type: ignore
 
             comments = p.get("comments", {}).get("summary", {}).get("total_count", 0)
             shares = p.get("shares", {}).get("count", 0)
@@ -195,7 +195,7 @@ def ingest_posts(inicio: date, fin: date):
                             DO UPDATE SET nombre = EXCLUDED.nombre
                             RETURNING id
                         """, (PLATAFORMA, nombre_reaccion))
-                        tipo_id = cur.fetchone()[0]
+                        tipo_id = cur.fetchone()[0] # type: ignore
 
                     upsert_reaccion_publicacion_diaria(
                         con, PLATAFORMA, FB_PAGE_ID, pub_id, fecha_descarga, tipo_id, cantidad
