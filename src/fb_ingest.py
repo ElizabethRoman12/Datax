@@ -32,22 +32,15 @@ token_facebook = obtener_token_pagina(token_usuario, FB_PAGE_ID) # type: ignore
 
 # Helpers
 def conn():
-    """Retorna conexión PostgreSQL."""
     return psycopg2.connect(PG_URL)
 
 def fb_get_fb(path, params=None):
-    """Wrapper para fb_get con token dinámico."""
     return fb_get(path, params or {}, access_token=token_facebook)
 
 def fb_paginate(path, params=None):
-    """Wrapper para paginate con token dinámico."""
     return paginate(path, params or {}, access_token=token_facebook)
 
 def parse_insights(js, metrics_map):
-    """
-    Convierte datos de /insights en un dict agrupado por fecha o lifetime.
-    Si la métrica no trae 'end_time' (caso lifetime), usa la fecha actual.
-    """
     out = {}
     for m in js.get("data", []):
         name = m.get("name")
@@ -66,7 +59,6 @@ def parse_insights(js, metrics_map):
 
 # Página
 def ingest_page():
-    """Inserta/actualiza la página base."""
     js = fb_get_fb(FB_PAGE_ID, {"fields": "id,name"})
     page = {
         "pagina_id": str(js["id"]),
@@ -76,12 +68,8 @@ def ingest_page():
     with conn() as con:
         upsert_pagina(con, page)
 
-# Publicaciones y Métricas
+# Publicaciones
 def get_posts_por_rango(inicio: date, fin: date):
-    """
-    Descarga publicaciones dentro del rango [inicio, fin] (inclusivo).
-    Corrige el desfase UTC → hora local (UTC-4).
-    """
     since = inicio - timedelta(days=1)
     fields = ",".join([
         "id","created_time","message","permalink_url","status_type",
@@ -108,11 +96,10 @@ def get_posts_por_rango(inicio: date, fin: date):
         return []
 
     if not publicaciones:
-        print(f"⚠ No hay publicaciones entre {inicio} y {fin}")
+        print(f" No hay publicaciones entre {inicio} y {fin}")
     return publicaciones
 
 def get_reactions_breakdown(post_id: str) -> dict:
-    """Obtiene desglose de reacciones por tipo."""
     mapping = {
         "LIKE":  "me_gusta",
         "LOVE":  "me_encanta",
@@ -131,7 +118,6 @@ def get_reactions_breakdown(post_id: str) -> dict:
     return out
 
 def daily_post_insights(post_id: str):
-    """Obtiene métricas lifetime de una publicación."""
     metrics_map = {
         "post_impressions": "impressions",
         "post_impressions_unique": "reach",
@@ -144,23 +130,36 @@ def daily_post_insights(post_id: str):
     })
     return parse_insights(js, metrics_map)
 
-
-
 def ingest_posts(inicio: date, fin: date):
-    """Inserta publicaciones y métricas dentro del rango (snapshot diario)."""
     posts = get_posts_por_rango(inicio, fin)
     if not posts:
         return
 
     print(f"* {len(posts)} publicaciones encontradas entre {inicio} y {fin}")
 
-    #Fecha del snapshot del día (para métricas y reacciones)
     fecha_descarga = date.today()
 
     with conn() as con:
         for p in posts:
             pub_id = str(p["id"])
-            upsert_publicacion(con, PLATAFORMA, FB_PAGE_ID, p) # type: ignore
+
+            # Insertar solo si no existe — NO actualizar campos estáticos
+            try:
+                con.cursor().execute("""
+                    INSERT INTO publicaciones (plataforma, pagina_id, publicacion_id, url_publicacion, fecha_hora_publicacion, texto_publicacion, formato)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (publicacion_id) DO NOTHING;
+                """, (
+                    PLATAFORMA,
+                    FB_PAGE_ID,
+                    pub_id,
+                    p.get("permalink_url"),
+                    p["created_time"].replace("Z","+00:00"),
+                    p.get("message"),
+                    "video" if "video" in (p.get("status_type","").lower()) else "imagen"
+                ))
+            except:
+                pass
 
             comments = p.get("comments", {}).get("summary", {}).get("total_count", 0)
             shares = p.get("shares", {}).get("count", 0)
@@ -183,9 +182,12 @@ def ingest_posts(inicio: date, fin: date):
                     "clics_enlace": clicks,
                     "ctr": ctr,
                 }
+
                 upsert_metricas_publicacion_diaria(
                     con, PLATAFORMA, FB_PAGE_ID, pub_id, fecha_descarga, m
                 )
+
+                # Reacciones
                 for nombre_reaccion, cantidad in rx.items():
                     with con.cursor() as cur:
                         cur.execute("""
@@ -201,30 +203,52 @@ def ingest_posts(inicio: date, fin: date):
                         con, PLATAFORMA, FB_PAGE_ID, pub_id, fecha_descarga, tipo_id, cantidad
                     )
 
-# Métricas de Página y Audiencia
+# Métricas página
 def ingest_page_metrics_range(inicio: date, fin: date):
-    """Inserta métricas de la página dentro del rango."""
+    """
+    Inserta métricas de la página dentro del rango.
+    Facebook solo permite rangos de hasta ~93 días.
+    Por eso dividimos el rango en bloques de 90 días.
+    """
     metrics_map = {
         "page_impressions": "impresiones",
         "page_impressions_unique": "alcance",
         "page_video_views": "video_views",
         "page_fans": "fans_total"
     }
-    js = fb_get_fb(f"{FB_PAGE_ID}/insights", {
-        "metric": ",".join(metrics_map),
-        "period": "day",
-        "since": inicio.isoformat(),
-        "until": fin.isoformat()
-    })
-    by_day = parse_insights(js, metrics_map)
-    with conn() as con:
-        for fecha, fila in by_day.items():
-            if inicio <= fecha <= fin:
-                fila["fecha_corte"] = fecha
-                upsert_estadistica_pagina_semanal(con, PLATAFORMA, FB_PAGE_ID, fila)
+
+    delta = timedelta(days=90)
+    bloque_inicio = inicio
+
+    while bloque_inicio <= fin:
+        bloque_fin = min(bloque_inicio + delta, fin)
+        print(f"  → Descargando métricas de página {bloque_inicio} → {bloque_fin}")
+
+        try:
+            js = fb_get_fb(f"{FB_PAGE_ID}/insights", {
+                "metric": ",".join(metrics_map),
+                "period": "day",
+                "since": bloque_inicio.isoformat(),
+                "until": bloque_fin.isoformat()
+            })
+        except Exception as e:
+            print(f"[WARN] Error obteniendo insights en bloque {bloque_inicio}→{bloque_fin}: {e}")
+            bloque_inicio = bloque_fin + timedelta(days=1)
+            continue
+
+        by_day = parse_insights(js, metrics_map)
+
+        with conn() as con:
+            for fecha, fila in by_day.items():
+                if bloque_inicio <= fecha <= bloque_fin:
+                    fila["fecha_corte"] = fecha
+                    upsert_estadistica_pagina_semanal(
+                        con, PLATAFORMA, FB_PAGE_ID, fila
+                    )
+
+        bloque_inicio = bloque_fin + timedelta(days=1)
 
 def ingest_audience_segments_range(fecha: date):
-    """Inserta segmentación de audiencia (género, país, ciudad)."""
     metrics = {
         "genero": "page_fans_gender_age",
         "pais": "page_fans_country",
@@ -246,22 +270,27 @@ def ingest_audience_segments_range(fecha: date):
                     data = v.get("value", {})
                     for k, qty in (data or {}).items():
                         insert_segmento_semanal(con, PLATAFORMA, FB_PAGE_ID, fecha, **{campo: k}, cantidad=int(qty or 0))
+
+# MAIN
 def main():
     if len(sys.argv) == 3:
         inicio = datetime.strptime(sys.argv[1], "%Y-%m-%d").date()
         fin = datetime.strptime(sys.argv[2], "%Y-%m-%d").date()
     else:
-        inicio = fin = date.today()
+        hoy = date.today()
+        inicio = date(hoy.year, 1, 1)   # Enero del año actual
+        fin = hoy
 
     print(f"\n→ FB: Ingestando datos desde {inicio} hasta {fin}\n")
+
     ingest_page()
     ingest_posts(inicio, fin)
     ingest_page_metrics_range(inicio, fin)
     ingest_audience_segments_range(fin)
+
     calcular_variaciones()
+
     print("\n✔ FB listo (rango procesado correctamente)")
 
 if __name__ == "__main__":
     main()
-
-

@@ -10,12 +10,9 @@ python -m venv .venv
  pip install -r requisitos.txt
 
 4: Ejecutar ingesta de Facebook:
- python src/fb_ingest.py (modo diario)
- python src/fb_ingest.py 2025-10-01 2025-10-12 (rango personalizado)
-
+ python src/fb_ingest.py 
 5: Ejecutar la ingesta de Instagram:
-python src/ig_ingest.py (modo diario)
-python src/ig_ingest.py 2025-10-01 2025-10-12 (rango personalizado)
+python src/ig_ingest.py
 
 6. Si se desea actualizar el token de insta y facebook 
    python src/refresh_graph.py   
@@ -50,8 +47,5 @@ python src/fb_ig_ingest_unificado.py facebook 2025-09-14 2025-10-15
 python src/fb_ig_ingest_unificado.py instagram 2025-09-14 2025-10-15
 
 
-NOTA 1:
-Los archivos li_api, li_discover, li_ingest_nuevo, li_ingest, li_sql, li_test_shares, refresh_tokens
-son archivos en construccion para cuando se obtenga los permisos de la api de linkedin
-NOTA 2:
+NOTA:
 La ingesta de datos es desde el 1 de enero del  año actual hasta la fecha actual (la fecha de ejecución del script).

@@ -5,11 +5,10 @@ import psycopg2
 from dotenv import load_dotenv
 from calc_variaciones import calcular_variaciones
 
-from tokens import obtener_token  
+from tokens import obtener_token
 from graph_api import fb_get, paginate
 from graph_sql import (
     upsert_pagina,
-    upsert_publicacion,
     upsert_metricas_publicacion_diaria,
     upsert_reaccion_publicacion_diaria,
     upsert_estadistica_pagina_semanal,
@@ -44,7 +43,19 @@ def ig_id() -> str:
     return str(IG_USER_ID)
 
 def iso_date(s: str) -> date:
-    return datetime.fromisoformat(s.replace("Z", "+00:00").replace("+0000", "+00:00")).date()
+    return datetime.fromisoformat(
+        s.replace("Z", "+00:00").replace("+0000", "+00:00")
+    ).date()
+
+def infer_formato_ig(media_type: str | None) -> str:
+    mt = (media_type or "").upper()
+    if mt == "IMAGE":
+        return "imagen"
+    if mt == "VIDEO":
+        return "video"
+    if mt == "CAROUSEL_ALBUM":
+        return "carrusel"
+    return "desconocido"
 
 # Ingesta de Cuenta
 def ingest_account():
@@ -72,6 +83,8 @@ def get_media_por_rango(inicio: date, fin: date):
             fecha_pub = iso_date(ts)
             if inicio <= fecha_pub <= fin:
                 publicaciones.append(item)
+    if not publicaciones:
+        print(f"⚠ No hay publicaciones entre {inicio} y {fin}")
     return publicaciones
 
 def media_insights_lifetime(media_id: str) -> dict:
@@ -89,37 +102,50 @@ def media_insights_lifetime(media_id: str) -> dict:
                 print(f"[WARN] insights {metric} falló para media {media_id}: {e}")
     return out
 
-from datetime import date
-
 def ingest_media(inicio: date, fin: date):
     """Inserta publicaciones IG y sus métricas dentro del rango (snapshot diario)."""
     publicaciones = get_media_por_rango(inicio, fin)
     if not publicaciones:
-        print(f"⚠ No hay publicaciones entre {inicio} y {fin}")
         return
 
     print(f"* {len(publicaciones)} publicaciones encontradas entre {inicio} y {fin}")
 
     fecha_descarga = date.today()
+    pagina_id = ig_id()
 
     with conn() as con:
         for m in publicaciones:
             media_id = str(m["id"])
-            fecha_pub = iso_date(m["timestamp"])
+            ts_raw = m.get("timestamp")
 
-            publicacion = {
-                "id": media_id,
-                "created_time": m.get("timestamp"),
-                "message": m.get("caption"),
-                "permalink_url": m.get("permalink"),
-                "status_type": m.get("media_type", "").upper(),
-                "attachments": {"media_type": m.get("media_type"), "unshimmed_url": m.get("media_url")},
-                "shares": {"count": 0},
-                "comments": {"summary": {"total_count": int(m.get("comments_count") or 0)}},
-                "reactions": {"summary": {"total_count": int(m.get("like_count") or 0)}},
-            }
-            upsert_publicacion(con, PLATAFORMA, ig_id(), publicacion)
+            # INSERT de publicación solo si no existe (no actualiza campos estáticos)
+            if ts_raw:
+                fecha_hora_pub = ts_raw.replace("Z", "+00:00").replace("+0000", "+00:00")
+            else:
+                fecha_hora_pub = None
 
+            try:
+                with con.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO publicaciones
+                            (plataforma, pagina_id, publicacion_id,
+                             url_publicacion, fecha_hora_publicacion,
+                             texto_publicacion, formato)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (publicacion_id) DO NOTHING;
+                    """, (
+                        PLATAFORMA,
+                        pagina_id,
+                        media_id,
+                        m.get("permalink"),
+                        fecha_hora_pub,
+                        m.get("caption"),
+                        infer_formato_ig(m.get("media_type")),
+                    ))
+            except Exception as e:
+                print(f"[WARN] No se pudo insertar publicación {media_id}: {e}")
+
+            # Métricas lifetime de la media
             ins = media_insights_lifetime(media_id)
             metricas = {
                 "visualizaciones": int(ins.get("video_views", 0)),
@@ -134,59 +160,84 @@ def ingest_media(inicio: date, fin: date):
             }
 
             upsert_metricas_publicacion_diaria(
-                con, PLATAFORMA, ig_id(), media_id, fecha_descarga, metricas
+                con, PLATAFORMA, pagina_id, media_id, fecha_descarga, metricas
             )
 
+            # Reacción principal: "me_gusta"
             with con.cursor() as cur:
                 cur.execute("""
                     INSERT INTO tipo_reaccion (plataforma, nombre)
                     VALUES (%s,%s)
-                    ON CONFLICT (plataforma, nombre) DO UPDATE SET nombre=EXCLUDED.nombre
+                    ON CONFLICT (plataforma, nombre)
+                    DO UPDATE SET nombre=EXCLUDED.nombre
                     RETURNING id
                 """, (PLATAFORMA, "me_gusta"))
-                tipo_id = cur.fetchone()[0]
+                tipo_id = cur.fetchone()[0] # type: ignore
 
             upsert_reaccion_publicacion_diaria(
-                con, PLATAFORMA, ig_id(), media_id, fecha_descarga, tipo_id, int(m.get("like_count") or 0)
+                con, PLATAFORMA, pagina_id, media_id, fecha_descarga,
+                tipo_id, int(m.get("like_count") or 0)
             )
 
 # Página y Audiencia
 def ingest_account_range(inicio: date, fin: date):
-    """Inserta métricas diarias de cuenta IG (seguidores y alcance) para el rango."""
-    per_day = {}
+    """
+    Inserta métricas diarias de cuenta IG (seguidores y alcance) para el rango.
+    Instagram solo permite ranges de MAX 30 días.
+    """
+    delta = timedelta(days=29)   # IG permite máximo 30 días
+    bloque_inicio = inicio
 
-    def fetch_metric(metric, start, end):
-        try:
-            js = ig_get(f"{ig_id()}/insights", {
-                "period": "day",
-                "since": int(datetime.combine(start, datetime.min.time()).replace(tzinfo=timezone.utc).timestamp()),
-                "until": int(datetime.combine(end, datetime.min.time()).replace(tzinfo=timezone.utc).timestamp()),
-                "metric": metric
-            })
-            for m in js.get("data", []):
-                for v in m.get("values", []):
-                    d = datetime.fromisoformat(v["end_time"].replace("Z","+00:00")).date()
-                    per_day.setdefault(d, {"reach": 0, "follower_count": 0})
-                    per_day[d][metric] = int(v.get("value") or 0)
-        except RuntimeError as e:
-            print(f"[WARN] {metric} falló: {e}")
+    while bloque_inicio <= fin:
+        bloque_fin = min(bloque_inicio + delta, fin)
+        print(f"  → IG métricas de cuenta {bloque_inicio} → {bloque_fin}")
 
-    fetch_metric("reach", inicio, fin)
-    fetch_metric("follower_count", inicio, fin)
+        per_day: dict[date, dict] = {}
 
-    with conn() as con:
-        for d, vals in per_day.items():
-            fila = {
-                "fecha_corte": d,
-                "impresiones": 0,
-                "alcance": int(vals.get("reach", 0)),
-                "video_views": 0,
-                "fans_total": int(vals.get("follower_count", 0)),
-            }
-            upsert_estadistica_pagina_semanal(con, PLATAFORMA, ig_id(), fila)
+        def fetch_metric(metric, start, end):
+            try:
+                js = ig_get(f"{ig_id()}/insights", {
+                    "period": "day",
+                    "since": int(datetime.combine(start, datetime.min.time())
+                                 .replace(tzinfo=timezone.utc).timestamp()),
+                    "until": int(datetime.combine(end, datetime.min.time())
+                                 .replace(tzinfo=timezone.utc).timestamp()),
+                    "metric": metric
+                })
+                for m in js.get("data", []):
+                    for v in m.get("values", []):
+                        d = datetime.fromisoformat(
+                            v["end_time"].replace("Z","+00:00")
+                        ).date()
+                        per_day.setdefault(d, {"reach": 0, "follower_count": 0})
+                        per_day[d][metric] = int(v.get("value") or 0)
+
+            except RuntimeError as e:
+                # print(f"[WARN] {metric} falló {start}→{end}: {e}")
+                pass
+
+        # Ejecutar insights para el bloque
+        fetch_metric("reach", bloque_inicio, bloque_fin)
+        fetch_metric("follower_count", bloque_inicio, bloque_fin)
+
+        # Insertar resultados
+        with conn() as con:
+            for d, vals in per_day.items():
+                if bloque_inicio <= d <= bloque_fin:
+                    fila = {
+                        "fecha_corte": d,
+                        "impresiones": 0,
+                        "alcance": int(vals.get("reach", 0)),
+                        "video_views": 0,
+                        "fans_total": int(vals.get("follower_count", 0)),
+                    }
+                    upsert_estadistica_pagina_semanal(con, PLATAFORMA, ig_id(), fila)
+
+        bloque_inicio = bloque_fin + timedelta(days=1)
 
 def ingest_audience_segments_range(fecha: date):
     dims = {"city": "ciudad", "country": "pais", "gender": "genero", "age": "genero"}
+
     def fetch_breakdown(dim):
         return ig_get(f"{ig_id()}/insights", {
             "metric": "follower_demographics",
@@ -194,15 +245,17 @@ def ingest_audience_segments_range(fecha: date):
             "metric_type": "total_value",
             "breakdown": dim,
         })
-    buckets = {k:{} for k in dims}
+
+    buckets = {k: {} for k in dims}
     for dim in dims:
         try:
             js = fetch_breakdown(dim)
-            for b in (js.get("data",[{}])[0].get("breakdowns") or []):
+            for b in (js.get("data", [{}])[0].get("breakdowns") or []):
                 if (b.get("dimension") or "").lower() != dim:
                     continue
                 for v in b.get("values", []):
-                    name, val = str(v.get("name") or v.get("value")), int(v.get("value") or 0)
+                    name = str(v.get("name") or v.get("value"))
+                    val = int(v.get("value") or 0)
                     buckets[dim][name] = buckets[dim].get(name, 0) + val
         except RuntimeError as e:
             print(f"[WARN] demographics {dim} falló: {e}")
@@ -210,14 +263,21 @@ def ingest_audience_segments_range(fecha: date):
     with conn() as con:
         for dim, campo in dims.items():
             for k, qty in buckets[dim].items():
-                insert_segmento_semanal(con, PLATAFORMA, ig_id(), fecha, **{campo: f"AGE.{k}" if dim=="age" else k}, cantidad=qty)
+                valor = f"AGE.{k}" if dim == "age" else k
+                insert_segmento_semanal(
+                    con, PLATAFORMA, ig_id(), fecha,
+                    **{campo: valor},
+                    cantidad=qty
+                )
 
 def main():
     if len(sys.argv) == 3:
         inicio = datetime.strptime(sys.argv[1], "%Y-%m-%d").date()
         fin = datetime.strptime(sys.argv[2], "%Y-%m-%d").date()
     else:
-        inicio = fin = date.today()
+        hoy = date.today()
+        inicio = date(hoy.year, 1, 1)   # 1 de enero del año actual
+        fin = hoy
 
     print(f"\n→ IG: Ingestando datos desde {inicio} hasta {fin}\n")
 
